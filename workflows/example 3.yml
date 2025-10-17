@@ -1,0 +1,107 @@
+name: Build Slim
+
+concurrency:
+  # 防止不同分支/PR 互相取消
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest ]
+        python-version: [ "3.9", "3.10", "3.11", "3.12", "3.13" ]
+
+    runs-on: ${{ matrix.os }}
+
+    env:
+      PYTHONIOENCODING: "utf-8"
+      PYTHONUTF8: "1"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 📦 Create virtualenv
+        shell: bash
+        run: |
+          python -m venv venv
+          if [ -x "venv/bin/python" ]; then
+            echo "PYTHON_EXEC=$(pwd)/venv/bin/python" >> $GITHUB_ENV
+          else
+            echo "PYTHON_EXEC=$(pwd)/venv/Scripts/python.exe" >> $GITHUB_ENV
+          fi
+
+      - name: Install build deps
+        shell: bash
+        run: |
+          $PYTHON_EXEC -m pip install -q --upgrade -r requirements.txt
+
+      - name: Build (wheel + sdist)
+        shell: bash
+        run: |
+          $PYTHON_EXEC setup.py build_ext --inplace
+          $PYTHON_EXEC setup.py bdist_wheel --release
+
+      # 可选：调试输出，确认 dist 下确实有文件
+      - name: List dist
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            dir dist
+          else
+            ls -al dist
+          fi
+
+      - name: Upload artifacts (per-matrix)
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: warn
+          retention-days: 3
+
+  package-artifacts:
+    name: Package all builds into one zip
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # 步骤 1: 下载所有相关的构建 artifacts
+      - name: 📥 Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: collected
+          merge-multiple: true  # 合并多个 artifacts
+
+      # 步骤 2: 打包所有下载的 artifacts 到一个 zip 文件中
+      - name: 📦 Bundle all builds into a single zip
+        run: |
+          mkdir -p packaged
+          zip -r packaged/all-builds.zip collected/*  # 将所有下载的文件打包到一个压缩包
+        shell: bash
+
+      # 步骤 3: 删除下载的原始 artifacts（模拟 delete-merged）
+      - name: 🧹 Clean up the original artifacts
+        run: |
+          rm -rf collected  # 删除下载的文件夹，清理原始 artifacts
+        shell: bash
+
+      # 步骤 4: 上传打包好的压缩包
+      - name: ⬆️ Upload the final packaged zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-builds-packaged
+          path: packaged/all-builds.zip  # 只上传一个压缩包
+          retention-days: 3

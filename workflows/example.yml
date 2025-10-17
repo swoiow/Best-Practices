@@ -1,0 +1,131 @@
+name: Build and Package PyTrade
+
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: build-release
+  cancel-in-progress: true
+
+jobs:
+  build-wheels:
+    name: Building on ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+        python-version: [ "3.10", "3.11", "3.12", "3.13" ]
+
+    steps:
+      - name: 📥 Checkout source code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 📦 Create virtualenv
+        run: |
+          VENV_DIR="$HOME/.venv-pytrade"
+          python -m venv "$VENV_DIR"
+          if [ -x "$VENV_DIR/bin/python" ]; then
+            echo "PYTHON_EXEC=$VENV_DIR/bin/python" >> $GITHUB_ENV
+          else
+            echo "PYTHON_EXEC=$VENV_DIR/Scripts/python.exe" >> $GITHUB_ENV
+          fi
+        shell: bash
+
+      - name: 📚 Install build dependencies
+        run: |
+          $PYTHON_EXEC -m pip install --upgrade pip
+          $PYTHON_EXEC -m pip install wheel setuptools cython pandas polars requests tqdm
+        shell: bash
+
+      - name: 🔗 Merge external pytrade-dt module
+        run: python .github/add_pytrade_dt.py --repo https://github.com/swoiow/pytrade-dt.git
+        shell: bash
+
+      - name: 🏗️ Build wheel (release mode)
+        run: |
+          $PYTHON_EXEC setup.py build_ext --inplace
+          $PYTHON_EXEC setup.py bdist_wheel --release
+        shell: bash
+
+      - name: ⬆️ Upload wheel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: dist/*
+          retention-days: 7
+
+
+  package-artifacts:
+    name: Package wheels into platform-specific zips
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Download Linux wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-ubuntu-latest-*
+          path: collected/linux
+          merge-multiple: true
+
+      - name: 📥 Download Windows wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-windows-latest-*
+          path: collected/windows
+          merge-multiple: true
+
+      - name: 📥 Download macOS wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-macos-latest-*
+          path: collected/macos
+          merge-multiple: true
+
+      - name: 📦 Bundle wheels by platform
+        run: |
+          mkdir -p packaged
+          zip -j packaged/pytrade-linux.zip collected/linux/*
+          zip -j packaged/pytrade-windows.zip collected/windows/*
+          zip -j packaged/pytrade-macos.zip collected/macos/*
+        shell: bash
+
+      - name: ⬆️ Upload final packaged zips
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytrade-packaged
+          path: packaged/*
+          retention-days: 7
+
+
+#  release:
+#    name: Publish GitHub Release
+#    if: startsWith(github.ref, 'refs/tags/')
+#    needs: package-artifacts
+#    runs-on: ubuntu-latest
+#    steps:
+#      - name: 📥 Download packaged zips
+#        uses: actions/download-artifact@v4
+#        with:
+#          name: pytrade-packaged
+#          path: release
+#
+#      - name: 🚀 Create GitHub Release
+#        uses: softprops/action-gh-release@v2
+#        with:
+#          files: release/*
+#        env:
+#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
